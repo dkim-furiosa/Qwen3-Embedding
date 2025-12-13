@@ -10,8 +10,8 @@ shift
 python run_mteb.py \
   --model ${model_path} \
   --model_name ${model_name} \
-  --precision fp16 \
-  --model_kwargs "{\"max_length\": 8192, \"attn_type\": \"causal\", \"pooler_type\": \"last\", \"do_norm\": true, \"use_instruction\": true, \"instruction_template\": \"Instruct: {}\nQuery:\", \"instruction_dict_path\": \"task_prompts.json\", \"attn_implementation\":\"flash_attention_2\"}" \
+  --precision bf16 \
+  --model_kwargs "{\"max_length\": 8192, \"attn_type\": \"causal\", \"pooler_type\": \"last\", \"do_norm\": true, \"use_instruction\": true, \"instruction_template\": \"Instruct: {}\nQuery:\", \"instruction_dict_path\": \"task_prompts.json\", \"attn_implementation\":\"flash_attention_2\", \"dtype\": \"bfloat16\", \"device\": \"cpu\"}" \
   --run_kwargs "{\"save_predictions\": \"true\"}" \
   --output_dir results/${model_name} \
   --batch_size 8 \

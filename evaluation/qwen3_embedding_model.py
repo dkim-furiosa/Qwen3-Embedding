@@ -17,7 +17,7 @@ from mteb.encoder_interface import PromptType
 from mteb.models.wrapper import Wrapper
 from mteb.model_meta import ModelMeta
 import mteb
-
+from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +33,8 @@ class TransformersTextEmbedder(torch.nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.base_model = AutoModel.from_pretrained(model, **kwargs)
+        self.model = model
+        self.client = OpenAI(api_key="", base_url="http://localhost:8000/v1")
         self.tokenizer = AutoTokenizer.from_pretrained(model, **kwargs)
         self.tokenizer.padding_side = "left"
         self.pooler_type = pooler_type
@@ -68,7 +69,7 @@ class TransformersTextEmbedder(torch.nn.Module):
     def tokenize(self, texts, max_length: int, prompt=None) -> BatchEncoding:
         if prompt:
             texts = [prompt + t for t in texts] 
-        inputs = self.tokenizer(texts, padding=True, truncation=True, max_length=max_length, return_tensors='pt')
+        inputs = self.tokenizer(texts, truncation=True, max_length=max_length)
         return inputs
 
     def forward(
@@ -77,17 +78,13 @@ class TransformersTextEmbedder(torch.nn.Module):
         attention_mask: torch.Tensor,
         **kwargs
     ) -> torch.Tensor:
-        output = self.base_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True,
-            **kwargs
+        response = self.client.embeddings.create(
+            input=input_ids,
+            model=self.model,
+            dimensions=(self.truncate_dim if self.truncate_dim > 0 else None),
+            extra_body={"normalize": self.do_norm},
         )
-        embeddings = self.pooling(output.last_hidden_state, attention_mask)
-        if self.truncate_dim > 0:
-            embeddings = embeddings[:, :self.truncate_dim]
-        if self.do_norm:
-            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        embeddings = torch.tensor([datum.embedding for datum in response.data])
         return embeddings
 
     @staticmethod
@@ -206,7 +203,7 @@ class Qwen3Embedding(Wrapper):
         self.mp_qsize = mp_qsize
         n_gpu = torch.cuda.device_count()
         self.world_size = n_gpu
-        assert n_gpu > 0, 'woho, no no no!'
+        #assert n_gpu > 0, 'woho, no no no!'
         logger.info(f"We have {n_gpu=}, good.")
         self._input_queues = list()
         self._output_queues = list()
