@@ -19,37 +19,31 @@ from torch.utils.data._utils.worker import ManagerWatchdog
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoModel, is_torch_npu_available
 logger = logging.getLogger(__name__)
-from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import destroy_model_parallel
+
 import gc
 import math
 from sentence_transformers import CrossEncoder, SentenceTransformer
-from vllm.inputs.data import TokensPrompt
-
+import requests
 
 class Qwen3RerankerInferenceModel(CrossEncoder):
     def __init__(self, model_name, instruction="Given the user query, retrieval the relevant passages", **kwargs):
-        # self.lm = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.float32)
+        
         number_of_gpu=torch.cuda.device_count()
         self.instruction = instruction
+        self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.padding_side = "left"
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.suffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        self.max_length=kwargs.get('max_length', 8192)
-        self.suffix_tokens = self.tokenizer.encode(self.suffix, add_special_tokens=False)
-        # Cache commonly used token IDs
-        self.true_token = self.tokenizer("yes", add_special_tokens=False).input_ids[0]
-        self.false_token = self.tokenizer("no", add_special_tokens=False).input_ids[0]
-        self.sampling_params = SamplingParams(temperature=0, 
-            top_p=0.95, 
-            max_tokens=1,
-            logprobs=20, 
-            allowed_token_ids=[self.true_token,self.false_token],
-        )
-        self.lm = LLM(model=model_name, tensor_parallel_size=number_of_gpu, max_model_len=10000, enable_prefix_caching=True, distributed_executor_backend='ray', gpu_memory_utilization=0.8)
+        self.base_url = "http://localhost:8000/v1/score"
 
-        
+        self.query_template = "{prefix}<Instruct>: {instruction}\n\n<Query>: {query}\n\n"
+        self.document_template = "<Document>: {doc}{suffix}"
+
+        self.prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n'
+        self.suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+        chat_template_suffix ="<|im_start|>assistant\n<think>\n\n</think>\n\n" 
+        self.chat_template_suffix_token = self.tokenizer.encode(chat_template_suffix, add_special_tokens=False)
+
+        self.max_length=kwargs.get('max_length', 8192)
 
     def format_instruction(self, instruction, query, doc):
         if isinstance(query, tuple):
@@ -61,30 +55,49 @@ class Qwen3RerankerInferenceModel(CrossEncoder):
         ]
         return text
 
-    def process_batch(self, pairs, **kwargs):
-        messages = [self.format_instruction(self.instruction, query, doc) for query, doc in pairs]
-        messages =  self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=False, enable_thinking=False
+    def preprocess(self, pairs):
+
+        input_queries = [self.query_template.format(prefix=self.prefix, instruction=self.instruction, query=query) for query, doc in pairs] 
+        input_queries_len = [len(self.tokenizer.encode(query, add_special_tokens=False)) for query in input_queries]
+        
+        # truncate documents if needed 
+        full_sentences = [self.format_instruction(self.instruction, query, doc) for query, doc in pairs]
+
+        full_sentences =  self.tokenizer.apply_chat_template(
+            full_sentences, tokenize=True, add_generation_prompt=False, enable_thinking=False
         )
-        messages = [ele[:self.max_length] + self.suffix_tokens for ele in messages]
-        messages = [TokensPrompt(prompt_token_ids=ele) for ele in messages]
-        outputs = self.lm.generate(messages, self.sampling_params, use_tqdm=False)
-        scores = []
-        for i in range(len(outputs)):
-            final_logits = outputs[i].outputs[0].logprobs[-1]
-            token_count = len(outputs[i].outputs[0].token_ids)
-            if self.true_token not in final_logits:
-                true_logit = -10
-            else:
-                true_logit = final_logits[self.true_token].logprob
-            if self.false_token not in final_logits:
-                false_logit = -10
-            else:
-                false_logit = final_logits[self.false_token].logprob
-            true_score = math.exp(true_logit)
-            false_score = math.exp(false_logit)
-            score = true_score / (true_score + false_score)
-            scores.append(score)
+
+        full_sentences = [e[:self.max_length] + self.chat_template_suffix_token for e in full_sentences]
+        
+        input_docs_truncated = [sentence[q_len:] for sentence, q_len in zip(full_sentences, input_queries_len)]
+        input_docs_truncated = [self.tokenizer.decode(ele, skip_special_tokens=True) for ele in input_docs_truncated]
+        
+        return input_queries, input_docs_truncated
+
+    def post_http_request(self, queries, documents, stream=False):
+        headers = {"Content-Type": "application/json"}
+        pload = {
+            "model": self.model_name,
+            "text_1": queries,
+            "text_2": documents,
+        }
+        response = requests.post(self.base_url, 
+                                headers=headers, 
+                                json=pload, 
+                                stream=stream)
+   
+        return response
+
+    def get_score(self, queries, documents):
+        response = self.post_http_request(queries, documents)
+        outputs = json.loads(response.content)["data"]
+        outputs.sort(key=lambda x: x["index"])
+        scores = [output["score"] for output in outputs]           
+        return scores
+
+    def process_batch(self, pairs, **kwargs):
+        queries, documents = self.preprocess(pairs)
+        scores = self.get_score(queries, documents)
 
         return scores
 
@@ -107,5 +120,5 @@ class Qwen3RerankerInferenceModel(CrossEncoder):
         return scores
 
     def stop(self):
-        destroy_model_parallel()
+        pass
 
