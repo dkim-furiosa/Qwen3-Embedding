@@ -4,8 +4,6 @@ model_path=$1
 shift
 model_name=$1
 shift
-benchmark=$1
-shift
 
 python run_mteb.py \
   --model ${model_path} \
@@ -15,5 +13,4 @@ python run_mteb.py \
   --run_kwargs "{\"save_predictions\": \"true\"}" \
   --output_dir results/${model_name} \
   --batch_size 8 \
-  --benchmark "${benchmark}" $@
-  # --tasks "WinoGrande"
+  --tasks "TwentyNewsgroupsClustering.v2,TweetSentimentExtractionClassification,SCIDOCS,TwitterSemEval2015,STS22.v2,SummEvalSummarization.v2,MindSmallReranking"
